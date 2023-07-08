@@ -1,0 +1,231 @@
+---
+title: "Algorithms Paper Report"
+author: "Ellery Galvin"
+date: "May 23, 2023"
+output:
+    pdf_document: default
+---
+
+```{r setup, include=FALSE}
+# Packages to use
+library(knitr)
+library(tidyverse)
+
+# Code factored out for reuse
+source("analyze_load.R")
+source("analyze_nlme.R")
+source("analyze_lrt.R")
+
+
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(out.width = "100%")
+
+```
+
+```{r import}
+# Import data
+df <- import_data(c("2U1D_unlocked","2U1D_locked","1U1D","MFP"))
+```
+
+## Non linear mixed effects modeling for integrated skill
+```{r nls}
+# Automated nls fits per group / skill
+starts <- find_starts(df)
+bounds <- find_bounds(starts)
+
+starts
+bounds
+```
+The nonlinear mixed effects model requires a starting guess for all the parameters together with upper and lower bounds.  This code automatically fits a simple nonlinear model to each group individually.  These values form the starting points subsequent guesses.  To build the model below, we began with a model for two groups only and iteratively added one group, using the results of the previous fit as guesses for the next fit.  After substantial manipulation, I succeeded with the following model.
+
+```{r nlme}
+# Fit NLME to the full dataset, potentially with estimates above
+# Starting guesses determined with starting points above, 
+# then by iteratively introducing a larger model
+fitted <- fit_nlme(
+     df %>% filter(session != 4), # Only training sessions
+     skill="integrated_skill",
+     start = c(
+          asym=c("2U1D_unlocked"=2.04443686, "1U1D" = 1.707104133, "MFP"=1.6822018, "2U1D_locked"=1.6150422),
+          scal=c("2U1D_unlocked"=0.31462406,"1U1D" =0.231073265, "MFP"=0.48888491, "2U1D_locked"=0.23575112),
+          xmid = 0.157604291
+     )
+     # If all six groups are wanted, these starting points will converge
+     # start=c(
+     #      asym=c("2U1D_unlocked"=2.04443686,"na_2D"=1.73706404,  "1U1D" = 1.707104133, "MFP"=1.6822018, "2U1D_locked"=1.6150422, "na_vr"=1.90190669),
+     #      scal=c("2U1D_unlocked"=0.31462406, "na_2D"=0.6420326,   "na_vr"=0.87035339),
+     #      xmid = 0.157604291)    
+)
+```
+```{r nlme_plot, fig.height=11, units="in"}
+# Plot model with the data
+ggplot(   data=df %>% filter(session != 4), 
+          mapping=aes(x=progress,y=integrated_skill)) + 
+     geom_point(na.rm = TRUE) +
+     geom_line(data=fitted$fits, mapping=aes(x=progress,y=predictions))+
+     facet_grid(vars(group)) +
+     theme_bw(base_size=12) +
+     labs(title="NLME integrated skill data over training",
+          subtitle="Asymptote highest for 2 up 1 down unlocked",
+          x="Proportion training completed", 
+          y="Sum of task skills",
+          )
+ggsave("alg_nlme_w_data.jpg")
+
+```
+```{r nlme_plot2}
+# Plot the curves themselves
+ggplot(data=fitted$fits, mapping=aes(x=progress, y=predictions, color=group)) +
+     geom_line() +
+     theme_bw(base_size=12) +
+     labs(title="NLME integrated skill curves over training",
+          subtitle="Median fixed progression shows much lower rate",
+          x="Proportion training completed",
+          y="Sum of task skills"
+     )
+ggsave("alg_nlme_curves.jpg")
+# Print the model summary
+change_intercept(fitted$model$coefficients$fixed)
+VarCorr(fitted$model)
+```
+This model uses a one fixed effect per group for the asymptote and the scale parameters.  It uses a global parameter for the horizontal shift, xmid.   This simplification is required because the xmid parameter does not vary much between groups, and including it causes a numerically singular model as a result.  The individual subjects form the random effects for the asymptote parameter.  We could not fit a model with random effects for the scale parameter due to overparameterization.  
+
+The (Intercept) specifications correspond to the 2 up 1 down unlocked group.  We see that the 2 up 1 down unlocked group attains a substantially higher asymptote than all other groups; all three remaining groups are similar.  Also interestingly, the median fixed progression group, the only non-adaptive algorithm, sees a substantially longer timescale for improvement; the other three adaptive groups are similar.  We can easily see this effect on the plot of the curves themselves.  Also importantly, the asymptote parameters varies significantly per subject, showing a standard deviation more than twice the size of the difference in the fixed effects.  The median fixed progression condition shows the smallest variance about the curve; we expect this behavior because all subjects are subject to the same difficulty control constant at each time while other groups will vary.
+
+These results suggest that the 2 up 1 down unlocked algorithm results in the highest integrated skill achievement.  The median fixed progression results in slower learning.  This effect likely occurs because it, on average, progresses too quickly for half the subjects and too slowly for the other half. Progressing too slowly prevents skill advancement per the difficulty control; progressing too quickly results in poor performance for a longer period of time.  Both effects reduce the rate of progress.  The high variance between subjects suggests that an accurate estimate of the effect from the training condition will require many subjects.
+
+### Assessing model residuals
+```{r nlme_res}
+# Test normality of residuals
+residual_data <- extract_residuals(fitted,"integrated_skill")
+
+# Show a qqplot.  Diagonal line is good
+ggplot(data=residual_data, aes(sample=res)) +
+     geom_qq() +
+     geom_qq_line() +
+     theme_bw(base_size=12) +
+     labs(title="QQ plot of NLME (integrated) residuals",
+          subtitle="Indicates left skew and skinniness",
+          x="Quantile of residuals",
+          y="Quantitle of normal"
+     )
+
+ggsave("alg_nlme_res_qq.jpg")
+
+# Show a histogram.  Bell curve is good
+ggplot(data=residual_data, aes(x=res)) + 
+     geom_histogram(bins=30) +
+     theme_bw(base_size=12) +
+     labs(title="Histogram of NLME (integrated) residuals",
+          subtitle= "Left skew arises from critical failures",
+          x="Deviation of skill from NLME prediction",
+          y="Count"
+     )
+ggsave("alg_nlme_res_hist.jpg")
+
+# Conduct a hypothesis test for normality.
+# *High* p-value is good
+shapiro.test(residual_data$res)
+```
+These plots show that the residuals for the NLME model are not normally distributed.  The shapiro test shows strong evidence for non-normality.  We can see clearly from the histogram that there is a left skew, indicating that extreme failures are affecting the model.  These results suggest that the parameter estimates are inaccurate.  It is difficult to say exactly how this inaccuracy is manifest due to nonlinearity.  Roughly speaking, the model tends to underestimate skill for most subjects, which we can also see by examining the model plots with the data.  Think, an outlier in any one group will tend to drag the curves down for all groups.
+
+### NLME permutation testing
+```{r nlme_perm}
+# Conduct a permutation test on NLME parameters
+
+adj_coeffs <- change_intercept(fitted$model$coefficients$fixed)
+
+set.seed(8293003) # Repeatability
+# Use data from training sessions with 1000 iterations on integrated skill.
+perm_res <- permutation_test(
+    df %>% filter(session!=4), 
+    "integrated_skill", 
+    adj_coeffs)
+
+param_dists <- data.frame(perm_res$samples) %>%
+    select(contains(".group")) %>%
+    gather(
+        key="param", 
+        value="value"
+    ) %>%
+    mutate(
+        true = map_vec( 
+            param,
+            function(el) {adj_coeffs[[el]]}
+            )
+    )
+```
+```{r perm_res, fig.height=11, units="in"}
+ggplot(data= param_dists, mapping=aes(x=abs(value) )) +
+    geom_histogram(bins=30) +
+    geom_vline(mapping=aes(xintercept=abs(true))) +
+    facet_grid(vars(param)) +
+    theme_bw(base_size=12) +
+    labs(title="Histogram of NLME parameter distribution",
+        subtitle= "Some estimates are more significant than others",
+        x="Parameter distance to 2U1D unlocked group",
+        y="Count"
+    )
+ggsave("alg_param_hist.jpg")
+print("Permutation test p-values.  Different from 2U1D unlocked?")
+perm_res$pvals
+```
+The fit success rate is sufficient to perform permutation testing.  This test uses the null hypothesis that group assignments have no impact of the model parameters.  It randomly reassigns the groups to each subject and fits the model again, 1000 times.  The histogram shows this sampling distribution of the model parameters for randomized group assignments; specifically the absolute value of the difference between 2 up 1 down unlocked and the non-adaptive conditions.  The vertical lines show the true absolute parameter value for the real data.  
+
+The test estimates a density function from this histogram and calculates the probability that the true absolute parameter value occurs under the null hypothesis that group doesn't matter (or something more extreme).
+
+We can see that the scal parameter for median fixed progression group is significantly different from that of the adaptive condition.  Namely, it is much larger.
+
+
+
+## Success rates in mockup testing
+```{r lrt_learn}
+# Assess presence of learning while testing in the mockup
+learn_fit <- lme(
+     fixed = integrated_skill ~ progress,
+     random = integrated_skill ~ progress | id,
+     data = df %>%
+          filter(session == 4) %>%
+          select(integrated_skill,progress,id),
+     na.action=na.omit
+)
+
+# Visualize the model
+fits <- new_data(unique(df$group))
+fits$predictions <- predict(object=learn_fit, newdata=fits, level=0)
+
+ggplot(data = df %>% filter(session==4), mapping=aes(x=progress,y=integrated_skill)) +
+    geom_point(na.rm=TRUE) + 
+    geom_line( data = fits, mapping=aes(x=progress, y=predictions)) +
+    theme_bw(base_size=12) +
+    labs(title="Linear mixed effects model of learning in mockup testing",
+        subtitle="Significant learning occurs",
+        x="Proportion of testing completed",
+        y="Integrated skill level"
+    )
+ggsave("alg_lrt_learning.jpg")
+
+summary(learn_fit)
+```
+
+We have fit a linear mixed effects effects model to the integrated skill data.  We included random effects for subjects.  The output indicates via the *progress* fixed effect, the rate of learning, that the average subject improves their skill by `r learn_fit$coefficients$fixed[["progress"]]` during testing.  The p-value is significant, indicating that we have strong evidence that learning is occuring.  I argue that the estimated learning is qualitatively significant, exceeding the entire range of excellent skill levels for one task; read, the subject may have improved from adequate to excellent.  A similar analysis of the first few trials shows very strong learning.  
+
+As such, I proceed to test mission success by considering only the first trial in testing.  Including trials from the beginning will include learning and using trials at the end fails to assess the effect of training, rather the effect of training *and* testing.
+```{r lrt}
+# Compute the distribution of the likelihood ratio for first trial in mockup.
+# MLE for binom(n,p) given data
+set.seed(827193)
+
+
+print(paste0("mission success pval: ",
+      glrt(df %>% filter(session==4, trial==1),"mission_success")))
+print(paste0("landing site success pval: ", 
+      glrt(df %>% filter(session==4, trial==1), "ls_success")))
+print(paste0("manual control success pval: ",
+      glrt(df %>% filter(session==4, trial==1), "mc_success")))
+print(paste0("terminal descent success pval: ", 
+      glrt(df %>% filter(session==4, trial==1), "de_success")))
+```
+We perform a generalized likelihood ratio test.  This test treats a success as a bernoulli random variable taking value $1$ with probability $p$.  The null hypothesis is that $p$ is identical for all four groups.  The test computes the maximum likelihood of observing the data under the assumption that the null hypothesis holds divided by the maximum likelihood of observing the data under the assumption that the null hypothesis is false.  The test simulates many observations under the null hypothesis and compares the true likelihood ratio with its sampling distribution to produce a p-value.  The results show that there is no significant difference in success rates between the groups for any task.  For what it's worth, same result for averaging multiple trials.
